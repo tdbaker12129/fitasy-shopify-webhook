@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: fitasy-shopify-webhook
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SHOPIFY_CLIENT_ID
+        sync: false
+      - key: SHOPIFY_CLIENT_SECRET
+        sync: false
+      - key: SHOPIFY_STORE_DOMAIN
+        value: fitasy-ai.myshopify.com
+      - key: GOOGLE_SHEET_ID
+        value: 1Z7B-Q9j13aMcH7Ye0ixjVcWeALyQLzk9f3qAGoig_QQ
+      - key: GOOGLE_SHEET_TAB
+        value: Orders
+      - key: GOOGLE_CREDS_JSON
+        sync: false
