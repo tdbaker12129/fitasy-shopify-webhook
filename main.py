@@ -98,10 +98,21 @@ async def orders_create(request: Request):
 
     order = json.loads(body)
 
-    # FILTER — only log orders that used a discount code
+    # FILTER — only log orders using Fitasy's specific discount codes
+    # Allowed: FitasyAffiliate (30%) and any 0% discount codes
     discount_codes = order.get("discount_codes", [])
     if not discount_codes:
         return JSONResponse(content={"status": "skipped - no discount code"}, status_code=200)
+
+    ALLOWED_CODES = {"fitasyaffiliate"}  # add more codes here in lowercase if needed
+    applied_code = discount_codes[0].get("code", "").lower()
+    applied_amount = float(discount_codes[0].get("amount", "0") or 0)
+
+    is_allowed_code = applied_code in ALLOWED_CODES
+    is_zero_percent = applied_amount == 0.0
+
+    if not (is_allowed_code or is_zero_percent):
+        return JSONResponse(content={"status": "skipped - not an allowed discount code"}, status_code=200)
 
     raw_date = order.get("created_at", "")
     try:
