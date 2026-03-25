@@ -1,12 +1,9 @@
 import os
-import hmac
-import hashlib
-import base64
 import json
 from datetime import datetime, timezone
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -63,18 +60,6 @@ def append_row(row: list):
     ).execute()
 
 
-def verify_shopify_webhook(data: bytes, hmac_header: str) -> bool:
-    if not SHOPIFY_CLIENT_SECRET:
-        return True
-    digest = hmac.new(
-        SHOPIFY_CLIENT_SECRET.encode("utf-8"),
-        data,
-        hashlib.sha256
-    ).digest()
-    computed = base64.b64encode(digest).decode("utf-8")
-    return hmac.compare_digest(computed, hmac_header)
-
-
 async def get_customer_order_count(customer_id: int) -> int:
     if not customer_id:
         return 0
@@ -91,29 +76,26 @@ async def get_customer_order_count(customer_id: int) -> int:
 @app.post("/webhook/orders/create")
 async def orders_create(request: Request):
     body = await request.body()
-
-    hmac_header = request.headers.get("X-Shopify-Hmac-Sha256", "")
-    if not verify_shopify_webhook(body, hmac_header):
-        raise HTTPException(status_code=401, detail="Invalid webhook signature")
-
     order = json.loads(body)
 
-    # FILTER — only log orders using Fitasy's specific discount codes
-    # Allowed: FitasyAffiliate (30%) and any 0% discount codes
+    # FILTER — only log orders using Fitasy's discount codes:
+    # 1. "FitasyAffiliate" (any amount)
+    # 2. Any code that gives exactly $20 off
     discount_codes = order.get("discount_codes", [])
     if not discount_codes:
         return JSONResponse(content={"status": "skipped - no discount code"}, status_code=200)
 
-    ALLOWED_CODES = {"fitasyaffiliate"}  # add more codes here in lowercase if needed
-    applied_code = discount_codes[0].get("code", "").lower()
+    ALLOWED_CODES = {"fitasyaffiliate"}
+    applied_code   = discount_codes[0].get("code", "").lower()
     applied_amount = float(discount_codes[0].get("amount", "0") or 0)
 
-    is_allowed_code = applied_code in ALLOWED_CODES
-    is_zero_percent = applied_amount == 0.0
+    is_allowed_code  = applied_code in ALLOWED_CODES
+    is_twenty_dollars = applied_amount == 20.0
 
-    if not (is_allowed_code or is_zero_percent):
-        return JSONResponse(content={"status": "skipped - not an allowed discount code"}, status_code=200)
+    if not (is_allowed_code or is_twenty_dollars):
+        return JSONResponse(content={"status": "skipped - not an allowed discount"}, status_code=200)
 
+    # Extract fields
     raw_date = order.get("created_at", "")
     try:
         purchase_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
