@@ -15,7 +15,8 @@ SHOPIFY_CLIENT_ID      = os.environ.get("SHOPIFY_CLIENT_ID", "")
 SHOPIFY_CLIENT_SECRET  = os.environ.get("SHOPIFY_CLIENT_SECRET", "")
 SHOPIFY_STORE_DOMAIN   = os.environ.get("SHOPIFY_STORE_DOMAIN", "fitasy-ai.myshopify.com")
 GOOGLE_SHEET_ID        = os.environ.get("GOOGLE_SHEET_ID", "1Z7B-Q9j13aMcH7Ye0ixjVcWeALyQLzk9f3qAGoig_QQ")
-GOOGLE_SHEET_TAB       = os.environ.get("GOOGLE_SHEET_TAB", "Orders")
+GOOGLE_SHEET_TAB       = os.environ.get("GOOGLE_SHEET_TAB", "ORDERS")
+AFFILIATE_TAB          = os.environ.get("AFFILIATE_TAB", "Affiliate Database")
 GOOGLE_CREDS_JSON      = os.environ.get("GOOGLE_CREDS_JSON", "")
 
 _token_cache = {"token": None, "expires_at": None}
@@ -48,6 +49,18 @@ def get_sheets_service():
     return build("sheets", "v4", credentials=creds)
 
 
+def get_affiliate_codes() -> set:
+    """Pull all discount codes from column B of the Affiliate Database sheet."""
+    service = get_sheets_service()
+    result = service.spreadsheets().values().get(
+        spreadsheetId=GOOGLE_SHEET_ID,
+        range=f"{AFFILIATE_TAB}!B2:B1000"
+    ).execute()
+    values = result.get("values", [])
+    # Flatten, strip whitespace, lowercase for case-insensitive matching
+    return {row[0].strip().lower() for row in values if row and row[0].strip()}
+
+
 def append_row(row: list):
     service = get_sheets_service()
     body = {"values": [row]}
@@ -78,24 +91,19 @@ async def orders_create(request: Request):
     body = await request.body()
     order = json.loads(body)
 
-    # FILTER — only log orders using Fitasy's discount codes:
-    # 1. "FitasyAffiliate" (any amount)
-    # 2. Any code that gives exactly $20 off
+    # 1. Check if order has a discount code
     discount_codes = order.get("discount_codes", [])
     if not discount_codes:
         return JSONResponse(content={"status": "skipped - no discount code"}, status_code=200)
 
-    ALLOWED_CODES = {"fitasyaffiliate"}
-    applied_code   = discount_codes[0].get("code", "").lower()
-    applied_amount = float(discount_codes[0].get("amount", "0") or 0)
+    applied_code = discount_codes[0].get("code", "").strip().lower()
 
-    is_allowed_code  = applied_code in ALLOWED_CODES
-    is_twenty_dollars = applied_amount == 20.0
+    # 2. Check if that code is in our Affiliate Database (column B)
+    affiliate_codes = get_affiliate_codes()
+    if applied_code not in affiliate_codes:
+        return JSONResponse(content={"status": f"skipped - '{applied_code}' not in affiliate database"}, status_code=200)
 
-    if not (is_allowed_code or is_twenty_dollars):
-        return JSONResponse(content={"status": "skipped - not an allowed discount"}, status_code=200)
-
-    # Extract fields
+    # 3. Extract order fields
     raw_date = order.get("created_at", "")
     try:
         purchase_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
@@ -126,7 +134,7 @@ async def orders_create(request: Request):
     ]
 
     append_row(row)
-    return JSONResponse(content={"status": "ok"}, status_code=200)
+    return JSONResponse(content={"status": "ok", "code": discount_code}, status_code=200)
 
 
 @app.get("/")
