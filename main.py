@@ -19,7 +19,21 @@ GOOGLE_SHEET_TAB       = os.environ.get("GOOGLE_SHEET_TAB", "ORDERS")
 AFFILIATE_TAB          = os.environ.get("AFFILIATE_TAB", "Affiliate Database")
 GOOGLE_CREDS_JSON      = os.environ.get("GOOGLE_CREDS_JSON", "")
 
+# ── CACHED CLIENTS (built once, reused) ──────────────────────────────────────
+_sheets_service = None
 _token_cache = {"token": None, "expires_at": None}
+
+
+def get_sheets_service():
+    global _sheets_service
+    if _sheets_service is None:
+        creds_dict = json.loads(GOOGLE_CREDS_JSON)
+        creds = Credentials.from_service_account_info(
+            creds_dict,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _sheets_service
 
 
 async def get_shopify_token() -> str:
@@ -27,7 +41,7 @@ async def get_shopify_token() -> str:
     if _token_cache["token"] and _token_cache["expires_at"] and now < _token_cache["expires_at"]:
         return _token_cache["token"]
     url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/oauth/access_token"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(url, data={
             "grant_type": "client_credentials",
             "client_id": SHOPIFY_CLIENT_ID,
@@ -40,15 +54,6 @@ async def get_shopify_token() -> str:
         return _token_cache["token"]
 
 
-def get_sheets_service():
-    creds_dict = json.loads(GOOGLE_CREDS_JSON)
-    creds = Credentials.from_service_account_info(
-        creds_dict,
-        scopes=["https://www.googleapis.com/auth/spreadsheets"]
-    )
-    return build("sheets", "v4", credentials=creds)
-
-
 def get_affiliate_codes() -> set:
     """Pull all discount codes from column B of the Affiliate Database sheet."""
     service = get_sheets_service()
@@ -57,7 +62,6 @@ def get_affiliate_codes() -> set:
         range=f"{AFFILIATE_TAB}!B2:B1000"
     ).execute()
     values = result.get("values", [])
-    # Flatten, strip whitespace, lowercase for case-insensitive matching
     return {row[0].strip().lower() for row in values if row and row[0].strip()}
 
 
@@ -76,13 +80,16 @@ def append_row(row: list):
 async def get_customer_order_count(customer_id: int) -> int:
     if not customer_id:
         return 0
-    token = await get_shopify_token()
-    url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/customers/{customer_id}.json"
-    headers = {"X-Shopify-Access-Token": token}
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, headers=headers)
-        if resp.status_code == 200:
-            return resp.json().get("customer", {}).get("orders_count", 0)
+    try:
+        token = await get_shopify_token()
+        url = f"https://{SHOPIFY_STORE_DOMAIN}/admin/api/2024-01/customers/{customer_id}.json"
+        headers = {"X-Shopify-Access-Token": token}
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get("customer", {}).get("orders_count", 0)
+    except Exception:
+        pass
     return 0
 
 
@@ -98,15 +105,18 @@ async def orders_create(request: Request):
 
     applied_code = discount_codes[0].get("code", "").strip().lower()
 
-    # 2. Check if that code is in our Affiliate Database (column B)
-    affiliate_codes = get_affiliate_codes()
-    if applied_code not in affiliate_codes:
-        return JSONResponse(content={"status": f"skipped - '{applied_code}' not in affiliate database"}, status_code=200)
+    # 2. Check against Affiliate Database
+    try:
+        affiliate_codes = get_affiliate_codes()
+        if applied_code not in affiliate_codes:
+            return JSONResponse(content={"status": f"skipped - not in affiliate database"}, status_code=200)
+    except Exception as e:
+        return JSONResponse(content={"status": f"error checking affiliates: {str(e)}"}, status_code=500)
 
     # 3. Extract order fields
     raw_date = order.get("created_at", "")
     try:
-        purchase_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+        purchase_date = datetime.fromisoformat(raw_date.replace("Z", "+00:00")).strftime("%-m/%d/%Y %H:%M:%S")
     except Exception:
         purchase_date = raw_date
 
@@ -133,7 +143,11 @@ async def orders_create(request: Request):
         shipping_state, all_time_orders, total_line_items,
     ]
 
-    append_row(row)
+    try:
+        append_row(row)
+    except Exception as e:
+        return JSONResponse(content={"status": f"error writing to sheet: {str(e)}"}, status_code=500)
+
     return JSONResponse(content={"status": "ok", "code": discount_code}, status_code=200)
 
 
